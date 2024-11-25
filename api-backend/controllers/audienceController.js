@@ -34,36 +34,54 @@ const getMongoOperator = (operator, value, isDate) => {
     return ops[operator];
 };
 
-const getAudienceSizeHandler = async (rules) => {
-    validateRules(rules);
-
-    const db = getDB();
-    let andConditions = [];
-    let orConditions = [];
+const buildConditions = (rules) => {
+    const combinedConditions = [];
 
     rules.forEach((rule) => {
-        let condition = {};
-        let value = parseValue(rule.field, rule.value);
+        const value = parseValue(rule.field, rule.value);
 
+        // Handle date-specific logic
         if (rule.field === "last_visit") {
             const startOfDay = new Date(value.setUTCHours(0, 0, 0, 0));
             const endOfDay = new Date(value.setUTCHours(23, 59, 59, 999));
-            value = { startOfDay, endOfDay };
+            value.startOfDay = startOfDay;
+            value.endOfDay = endOfDay;
         }
 
-        condition[rule.field] = getMongoOperator(rule.operator, value, rule.field === "last_visit");
+        const condition = { [rule.field]: getMongoOperator(rule.operator, value, rule.field === "last_visit") };
 
-        if (rule.condition === "AND") {
-            andConditions.push(condition);
-        } else if (rule.condition === "OR") {
-            orConditions.push(condition);
-        }
+        // Group conditions by logical operator
+        combinedConditions.push({ condition, logic: rule.condition });
     });
 
-    const query = {};
-    if (andConditions.length) query.$and = andConditions;
-    if (orConditions.length) query.$or = orConditions;
+    return combinedConditions;
+};
 
+const combineConditions = (conditions) => {
+    const query = {};
+
+    // Check if any rule has the 'OR' condition
+    const hasOrCondition = conditions.some((item) => item.logic === "OR");
+
+    if (hasOrCondition) {
+        query[Object.keys(conditions[0].condition)[0]] = Object.values(conditions[0].condition)[0];
+    } else {
+        // Apply all conditions using AND logic
+        const andConditions = conditions.map((item) => item.condition);
+        if (andConditions.length) query.$and = andConditions;
+    }
+
+    return query;
+};
+
+const getAudienceSizeHandler = async (rules) => {
+    validateRules(rules);
+
+    // Build and combine conditions dynamically
+    const conditions = buildConditions(rules);
+    const query = combineConditions(conditions);
+
+    const db = getDB();
     try {
         return await db.collection("customers").countDocuments(query);
     } catch (error) {
